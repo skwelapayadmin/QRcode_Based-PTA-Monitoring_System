@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Payment Status — EskwelaPay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+
+<div id="boot-screen" class="boot-screen">Loading EskwelaPay…</div>
+
+<div id="app-screen" style="display:none;">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-seal topbar-seal-img"><img src="assets/logo.png" alt="EskwelaPay seal"></div>
+      <div>
+        <div class="topbar-title">EskwelaPay</div>
+        <div class="topbar-sub">Sta. Lucia National High School</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="role-pill"><span class="dot"></span><span id="role-pill-text"></span></span>
+      <button class="btn-logout" id="logout-btn">Log out</button>
+    </div>
+  </div>
+  <div class="shell">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main" id="main"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/firebase-config.js"></script>
+<script src="js/shared.js"></script>
+<script>
+const NAV_STUDENT = [
+  {key:'status', label:'My Payment Status', icon:'👤'},
+  {key:'submit', label:'Submit Payment', icon:'💳'},
+];
+let currentPage = 'status';
+
+function enterApp(){
+  document.getElementById('boot-screen').style.display='none';
+  document.getElementById('app-screen').style.display='block';
+  renderSidebar();
+  renderPage();
+}
+function renderSidebar(){
+  const sb = document.getElementById('sidebar');
+  sb.innerHTML = NAV_STUDENT.map(it=>`
+    <button class="nav-item ${it.key===currentPage?'active':''}" data-page="${it.key}">
+      <span>${it.icon}</span><span>${it.label}</span>
+    </button>
+  `).join('');
+  sb.querySelectorAll('.nav-item').forEach(b=>{
+    b.addEventListener('click', ()=>{ currentPage=b.dataset.page; renderSidebar(); renderPage(); });
+  });
+}
+async function renderPage(){
+  const main = document.getElementById('main');
+  main.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try{
+    if(currentPage==='status') main.innerHTML = await pageOwnStatus();
+    if(currentPage==='submit') main.innerHTML = await pageSubmitPayment();
+  }catch(e){
+    console.error(e);
+    main.innerHTML = `<div class="empty-state">Could not load this page: ${e.message||e}. This is usually a Firestore Security Rules mismatch - check the browser console for the exact denied-permission error.</div>`;
+    return;
+  }
+  wireOwnPageEvents();
+}
+
+function subStatusPill(status){
+  const map = {pending:['⏳','Pending review'], approved:['✓','Approved'], rejected:['✕','Rejected']};
+  const [icon,label] = map[status]||['','Unknown'];
+  const cls = status==='approved'?'paid':status==='rejected'?'unpaid':'partial';
+  return `<span class="status-pill ${cls}">${icon} ${label}</span>`;
+}
+
+async function pageOwnStatus(){
+  const s = await fetchOneStudent(session.studentId);
+  if(!s) return `<div class="page-header"><h2>No record found</h2></div>`;
+  const payments = await fetchStudentPayments(s.id);
+  const paid = studentPaidAmount(s.id, payments);
+  const due = SETTINGS.amountDue;
+  const bal = Math.max(due-paid,0);
+  const status = studentStatus(paid);
+  const history = [...payments].sort((a,b)=>a.date<b.date?1:-1);
+
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">${session.role==='parent'?'Student / Parent':'Student'}</div>
+      <h2>My Payment Status</h2>
+      <div class="page-desc">School Year ${SETTINGS.schoolYear} · Deadline ${fmtDate(SETTINGS.deadline)}</div>
+    </div>
+    <div class="receipt-card">
+      <div class="receipt-top">
+        <div><div class="receipt-name">${s.name}</div><div class="receipt-meta">${s.id} · ${s.grade} · Section ${s.section}</div></div>
+        ${statusPill(status)}
+      </div>
+      <div class="receipt-amounts">
+        <div><div class="amt-label">Amount due</div><div class="amt-val">${money(due)}</div></div>
+        <div><div class="amt-label">Amount paid</div><div class="amt-val">${money(paid)}</div></div>
+        <div><div class="amt-label">Balance</div><div class="amt-val">${money(bal)}</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Confirmed payment history</h3></div>
+      ${history.length? `
+      <table><thead><tr><th>Date</th><th>Method</th><th>Reference</th><th>Amount</th></tr></thead><tbody>
+      ${history.map(p=>`<tr><td>${fmtDate(p.date)}</td><td>${p.method}</td><td class="id-mono">${p.reference}</td><td>${money(p.amount)}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state">No payments recorded yet.</div>`}
+    </div>
+  `;
+}
+
+async function pageSubmitPayment(){
+  const s = await fetchOneStudent(session.studentId);
+  if(!s) return `<div class="page-header"><h2>No record found</h2></div>`;
+  const submissions = await fetchOwnSubmissions(s.id);
+  const subHistory = [...submissions].sort((a,b)=>a.date<b.date?1:-1);
+
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">${session.role==='parent'?'Student / Parent':'Student'}</div>
+      <h2>Submit Payment</h2>
+      <div class="page-desc">Paid via GCash, Maya, or another method? Submit your reference number below.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Payment details</h3></div>
+      <div class="page-desc" style="margin-bottom:14px;">The PTA officer will verify this against their records before it's confirmed.</div>
+      <div class="form-grid">
+        <div class="field"><label>Grade &amp; Section</label><input value="${s.grade} · ${s.section}" disabled></div>
+        <div class="field"><label>Payment Amount</label><input type="number" id="sub-amount" placeholder="Enter amount" min="1"></div>
+      </div>
+      <div class="field"><label>Payment Method</label>
+        <select id="sub-method">
+          <option value="">Select Payment Method</option>
+          <option>GCash</option>
+          <option>Maya</option>
+          <option>PayPal</option>
+          <option>BDO / Bank</option>
+          <option>Cash</option>
+        </select>
+      </div>
+      <div class="field"><label>Reference Number</label><input id="sub-ref" class="mono" placeholder="Enter payment reference number"></div>
+      <button class="btn navy" id="btn-submit-payment" style="width:100%;">Submit Payment</button>
+      <div class="login-note" style="margin-top:14px;"><strong>Note:</strong> Your payment will be reviewed by the PTA officer. Please keep your payment reference number.</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>My submissions</h3></div>
+      ${subHistory.length? `
+      <table><thead><tr><th>Date</th><th>Method</th><th>Reference</th><th>Amount</th><th>Status</th></tr></thead><tbody>
+      ${subHistory.map(p=>`<tr><td>${fmtDate(p.date)}</td><td>${p.method}</td><td class="id-mono">${p.reference}</td><td>${money(p.amount)}</td><td>${subStatusPill(p.status)}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state">No submissions yet.</div>`}
+    </div>
+  `;
+}
+
+function wireOwnPageEvents(){
+  const btn = document.getElementById('btn-submit-payment');
+  if(!btn) return;
+  btn.addEventListener('click', async ()=>{
+    const amount = Number(document.getElementById('sub-amount').value);
+    const method = document.getElementById('sub-method').value;
+    const ref = document.getElementById('sub-ref').value.trim();
+    if(!amount || amount<=0){ showToast('Enter a valid amount.', 'error'); return; }
+    if(!method){ showToast('Select a payment method.', 'error'); return; }
+    if(!ref){ showToast('Enter a reference number.', 'error'); return; }
+    try{
+      const s = await fetchOneStudent(session.studentId);
+      await fsDb.collection('paymentSubmissions').add({
+        studentId: s.id, section: s.section, method, reference: ref, amount, date: today(), status: 'pending', submittedBy: session.uid
+      });
+      showToast('Payment submitted for review.', 'success');
+      renderPage();
+    }catch(e){
+      showToast('Could not submit: '+(e.message||e), 'error');
+    }
+  });
+}
+
+guardPage(['parent','student'], ()=>{ enterApp(); });
+</script>
+</body>
+</html>
