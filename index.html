@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Log In — EskwelaPay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+
+<div id="login-screen">
+  <div class="login-card" id="login-card-content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/firebase-config.js"></script>
+<script src="js/shared.js"></script>
+<script>
+let selectedRole = null;
+
+const ROLES = [
+  {key:'admin', title:'Admin', icon:'👤'},
+  {key:'adviser', title:'Adviser', icon:'📗'},
+  {key:'principal', title:'Principal', icon:'🎓'},
+  {key:'student', title:'Student   Parent', icon:'👪'},
+];
+
+function boot(){
+  auth.onAuthStateChanged(async (user)=>{
+    if(user){
+      const accDoc = await fsDb.collection('accounts').doc(user.uid).get();
+      if(!accDoc.exists){
+        showToast('Account has no role record - contact your PTA officer.', 'error');
+        await auth.signOut();
+        return;
+      }
+      const acc = accDoc.data();
+      window.location.href = HOME_PAGE[acc.role] || 'index.html';
+    }else{
+      showLogin();
+    }
+  });
+}
+
+function showLogin(){
+  const box = document.getElementById('login-card-content');
+  box.innerHTML = `
+    <div class="seal-row">
+      <div class="seal seal-img"><img src="assets/logo.png" alt="EskwelaPay seal"></div>
+      <div><div class="login-eyebrow">Sta. Lucia National High School · Pagadian City</div></div>
+    </div>
+    <h1>EskwelaPay</h1>
+    <div class="login-sub">Welcome to SkwelaPay!</div>
+
+    <div class="role-grid" id="role-grid">
+      ${ROLES.map(r=>`
+        <div class="role-card" data-role="${r.key}">
+          <div class="role-icon">${r.icon}</div>
+          <div class="role-title">${r.title}</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="login-field"><label id="id-label">Username</label><input id="login-user" class="mono" autocomplete="username"></div>
+    <div class="login-field">
+      <label>Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="login-pass" autocomplete="current-password">
+        <button type="button" class="pw-toggle" id="pw-toggle">Show</button>
+      </div>
+    </div>
+    <button class="btn-primary" id="login-btn">Continue</button>
+    <div class="login-error" id="login-error"></div>
+    <div class="login-note" id="forgot-wrap" style="display:none; margin-top:12px;">
+      <a href="#" id="forgot-link">Forgot password?</a>
+    </div>
+  `;
+
+  document.querySelectorAll('.role-card').forEach(card=>{
+    card.addEventListener('click', ()=>{
+      document.querySelectorAll('.role-card').forEach(c=>c.classList.remove('active'));
+      card.classList.add('active');
+      selectedRole = card.dataset.role;
+      const label = document.getElementById('id-label');
+      const forgotWrap = document.getElementById('forgot-wrap');
+      if(selectedRole==='admin'){
+        label.textContent = 'Email';
+        forgotWrap.style.display = 'block';
+      }else if(selectedRole==='student'){
+        label.textContent = 'Student ID';
+        forgotWrap.style.display = 'none';
+      }else{
+        label.textContent = 'Username';
+        forgotWrap.style.display = 'none';
+      }
+    });
+  });
+   document.querySelector('.role-card[data-role="admin"]').classList.add('active');
+  selectedRole = 'admin';
+  document.getElementById('id-label').textContent = 'Email';
+  document.getElementById('forgot-wrap').style.display = 'block';
+
+  document.getElementById('pw-toggle').addEventListener('click', ()=>{
+    const input = document.getElementById('login-pass');
+    const btn = document.getElementById('pw-toggle');
+    if(input.type==='password'){ input.type='text'; btn.textContent='Hide'; }
+    else{ input.type='password'; btn.textContent='Show'; }
+  });
+
+  document.getElementById('login-btn').addEventListener('click', async ()=>{
+    const err = document.getElementById('login-error');
+    const idVal = document.getElementById('login-user').value.trim();
+    const pass = document.getElementById('login-pass').value;
+    if(!idVal || !pass){ err.textContent='Enter both fields.'; return; }
+    const email = selectedRole === 'admin' ? idVal : slug(idVal)+LOGIN_DOMAIN;
+    try{
+      await auth.signInWithEmailAndPassword(email, pass);
+      err.textContent='';
+    }catch(e){
+      err.textContent = friendlyAuthError(e);
+    }
+  });
+
+  document.getElementById('forgot-link').addEventListener('click', async (e)=>{
+    e.preventDefault();
+    const idVal = document.getElementById('login-user').value.trim();
+    if(!idVal || !idVal.includes('@')){
+      showToast('Enter your admin email above first, then click Forgot password.', 'error');
+      return;
+    }
+    try{
+      await auth.sendPasswordResetEmail(idVal);
+      showToast('Password reset email sent.', 'success');
+    }catch(e){
+      showToast(friendlyAuthError(e), 'error');
+    }
+  });
+}
+function friendlyAuthError(e){
+  if(!e || !e.code) return 'Something went wrong. Try again.';
+  if(e.code.includes('wrong-password') || e.code.includes('user-not-found') || e.code.includes('invalid-credential')) return 'Incorrect username or password.';
+  if(e.code.includes('weak-password')) return 'Password needs to be at least 6 characters.';
+  return e.message || 'Something went wrong. Try again.';
+}
+
+boot();
+</script>
+</body>
+</html>

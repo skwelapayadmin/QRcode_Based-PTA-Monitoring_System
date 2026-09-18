@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — EskwelaPay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+
+<div id="boot-screen" class="boot-screen">Loading EskwelaPay…</div>
+
+<div id="app-screen" style="display:none;">
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-seal topbar-seal-img"><img src="assets/logo.png" alt="EskwelaPay seal"></div>
+      <div>
+        <div class="topbar-title">EskwelaPay</div>
+        <div class="topbar-sub">Sta. Lucia National High School</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="role-pill"><span class="dot"></span><span id="role-pill-text"></span></span>
+      <button class="btn-logout" id="logout-btn">Log out</button>
+    </div>
+  </div>
+  <div class="shell">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main" id="main"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/firebase-config.js"></script>
+<script src="js/shared.js"></script>
+<script>
+
+const NAV_ADMIN = [
+  {key:'dashboard', label:'Dashboard', icon:'📊'},
+  {key:'students', label:'Students', icon:'🧾'},
+  {key:'payments', label:'Record Payment', icon:'💳'},
+  {key:'submissions', label:'Payment Submissions', icon:'📥'},
+  {key:'staff', label:'Staff Accounts', icon:'🗝️'},
+  {key:'reports', label:'Reports & Summary', icon:'📁'},
+  {key:'settings', label:'PTA Settings', icon:'⚙️'},
+];
+let currentPage = 'dashboard';
+
+function enterApp(){
+  document.getElementById('boot-screen').style.display='none';
+  document.getElementById('app-screen').style.display='block';
+  renderSidebar();
+  renderPage();
+}
+function renderSidebar(){
+  const sb = document.getElementById('sidebar');
+  sb.innerHTML = NAV_ADMIN.map(it=>`
+    <button class="nav-item ${it.key===currentPage?'active':''}" data-page="${it.key}">
+      <span>${it.icon}</span><span>${it.label}</span>
+    </button>
+  `).join('');
+  sb.querySelectorAll('.nav-item').forEach(b=>{
+    b.addEventListener('click', ()=>{ currentPage=b.dataset.page; renderSidebar(); renderPage(); });
+  });
+}
+async function renderPage(){
+  const main = document.getElementById('main');
+  main.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try{
+    if(currentPage==='dashboard') main.innerHTML = await pageDashboard(false);
+    if(currentPage==='students') main.innerHTML = await pageStudents();
+    if(currentPage==='payments') main.innerHTML = await pagePayments();
+    if(currentPage==='submissions') main.innerHTML = await pageSubmissions();
+    if(currentPage==='staff') main.innerHTML = await pageStaff();
+    if(currentPage==='reports') main.innerHTML = await pageReports(true);
+    if(currentPage==='settings') main.innerHTML = pageSettings();
+  }catch(e){
+    console.error(e);
+    main.innerHTML = `<div class="empty-state">Could not load this page: ${e.message||e}. This is usually a Firestore Security Rules mismatch - check the browser console for the exact denied-permission error.</div>`;
+    return;
+  }
+  wirePageEvents();
+}
+async function pageStudents(){
+  const students = await fetchAllStudents();
+  const payments = await fetchAllPayments();
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">Admin · Setup &amp; Data</div>
+      <h2>Students</h2>
+      <div class="page-desc">Add students - this creates their account, their parent's account, and their QR code all at once.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Student list (${students.length})</h3>
+        <div class="toolbar">
+          <input class="search-input" id="student-search" placeholder="Search name or ID…">
+          <button class="btn navy" id="btn-add-student">+ Add student</button>
+        </div>
+      </div>
+      <div id="students-table-wrap">${studentsTable(students, payments, {edit:true})}</div>
+    </div>
+  `;
+}
+
+async function pagePayments(){
+  const students = await fetchAllStudents();
+  const payments = await fetchAllPayments();
+  const options = students.map(s=>`<option value="${s.id}">${s.name} — ${s.id}</option>`).join('');
+  const recent = payments.slice(0,8);
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">Admin · Payment Process</div>
+      <h2>Record a Payment</h2>
+      <div class="page-desc">Choose method, enter payment details, then verify and record.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Payment entry</h3></div>
+      <div class="form-grid">
+        <div class="field"><label>Student</label><select id="pay-student">${options}</select></div>
+        <div class="field"><label>Amount paid</label><input type="number" id="pay-amount" placeholder="e.g. 500" min="1"></div>
+      </div>
+      <div class="field"><label>Payment method</label>
+        <div class="method-grid" id="method-grid">
+          ${['GCash','Maya','PayPal','BDO / Bank','Cash'].map(m=>`<div class="method-opt" data-method="${m}">${m}</div>`).join('')}
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field"><label>Reference no.</label><input id="pay-ref" placeholder="e.g. GC-88213" class="mono"></div>
+        <div class="field"><label>Date paid</label><input type="date" id="pay-date" value="${today()}"></div>
+      </div>
+      <button class="btn navy" id="btn-record-payment">✓ Verify &amp; record payment</button>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Recently recorded</h3></div>
+      ${recent.length? `
+      <table>
+        <thead><tr><th>Date</th><th>Student</th><th>Method</th><th>Reference</th><th>Amount</th></tr></thead>
+        <tbody>
+          ${recent.map(p=>{
+            const s = students.find(x=>x.id===p.studentId);
+            return `<tr><td>${fmtDate(p.date)}</td><td>${s?s.name:p.studentId}</td><td>${p.method}</td><td class="id-mono">${p.reference}</td><td>${money(p.amount)}</td></tr>`;
+          }).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">No payments recorded yet.</div>`}
+    </div>
+  `;
+}
+
+async function pageSubmissions(){
+  const pending = await fetchPendingSubmissions();
+  const students = await fetchAllStudents();
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">Admin · Verification</div>
+      <h2>Payment Submissions</h2>
+      <div class="page-desc">Review payments submitted by students/parents, then approve or reject after checking your GCash/bank records.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Pending (${pending.length})</h3></div>
+      ${pending.length? `
+      <table>
+        <thead><tr><th>Date</th><th>Student</th><th>Method</th><th>Reference</th><th>Amount</th><th></th></tr></thead>
+        <tbody>
+          ${pending.map(p=>{
+            const s = students.find(x=>x.id===p.studentId);
+            return `<tr>
+              <td>${fmtDate(p.date)}</td>
+              <td>${s?s.name:p.studentId} <span class="id-mono">(${p.studentId})</span></td>
+              <td>${p.method}</td>
+              <td class="id-mono">${p.reference}</td>
+              <td>${money(p.amount)}</td>
+              <td style="text-align:right;white-space:nowrap;">
+                <button class="btn sm green" data-approve="${p.id}">Approve</button>
+                <button class="btn sm ghost danger" data-reject="${p.id}">Reject</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>` : `<div class="empty-state">No pending submissions.</div>`}
+    </div>
+  `;
+}
+async function approveSubmission(subId){
+  const doc = await fsDb.collection('paymentSubmissions').doc(subId).get();
+  if(!doc.exists) return;
+  const p = doc.data();
+  try{
+    await fsDb.collection('payments').add({studentId:p.studentId, section:p.section, method:p.method, reference:p.reference, amount:p.amount, date:p.date, verifiedBy:session.name});
+    await fsDb.collection('paymentSubmissions').doc(subId).update({status:'approved'});
+    showToast('Payment approved and recorded.', 'success');
+    renderPage();
+  }catch(e){ showToast('Could not approve: '+(e.message||e), 'error'); }
+}
+async function rejectSubmission(subId){
+  try{
+    await fsDb.collection('paymentSubmissions').doc(subId).update({status:'rejected'});
+    showToast('Submission rejected.', 'success');
+    renderPage();
+  }catch(e){ showToast('Could not reject: '+(e.message||e), 'error'); }
+}
+
+function staffRows(staff){
+  if(!staff.length) return `<div class="empty-state">No Principal or Adviser accounts yet.</div>`;
+  return staff.map(a=>`
+    <div class="staff-row">
+      <div><strong>${a.name}</strong>${a.section?` · Section ${a.section}`:''}<br><span class="staff-tag">${a.role}</span></div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="id-mono">${a.username}</span>
+        <button class="btn sm ghost" data-staff-account="${a.uid}">Account</button>
+        <button class="btn sm ghost danger" data-staff-delete="${a.uid}" data-staff-name="${a.name}">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function pageStaff(){
+  const snap = await fsDb.collection('accounts').where('role','in',['principal','adviser']).get();
+  const staff = snap.docs.map(d=>({uid:d.id, ...d.data()}));
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">Admin · Access Control</div>
+      <h2>Staff accounts</h2>
+      <div class="page-desc">Create logins for the Principal and for each section's Adviser/Teacher.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Existing staff (${staff.length})</h3></div>
+      <input class="search-input" id="staff-search" placeholder="Search name" style="width:100%;margin-bottom:12px;">
+      <button class="btn navy sm" id="btn-add-staff" style="margin-bottom:16px;">+ Add staff account</button>
+      <div id="staff-list-wrap">${staffRows(staff)}</div>
+    </div>
+  `;
+}
+
+function pageSettings(){
+  return `
+    <div class="page-header">
+      <div class="page-eyebrow">Admin · Configuration</div>
+      <h2>PTA Settings</h2>
+      <div class="page-desc">These apply school-wide.</div>
+    </div>
+    <div class="panel">
+      <div class="form-grid">
+        <div class="field"><label>PTA amount due per student</label><input type="number" id="set-amount" value="${SETTINGS.amountDue}"></div>
+        <div class="field"><label>School year</label><input id="set-year" value="${SETTINGS.schoolYear}"></div>
+      </div>
+      <div class="field"><label>Payment deadline</label><input type="date" id="set-deadline" value="${SETTINGS.deadline}"></div>
+      <button class="btn navy" id="btn-save-settings">Save settings</button>
+    </div>
+  `;
+}
+async function openEditStudent(studentId){
+  const s = studentId ? await fetchOneStudent(studentId) : {id:'', name:'', grade:'Grade 9', section:'', parentContact:''};
+  openModal(`
+    <h3>${studentId?'Edit student':'Add student'}</h3>
+    <div class="sub">${studentId?s.id:'A Student ID, a login for the student, a login for the parent, and a QR code will be generated automatically.'}</div>
+    <div class="form-grid">
+      <div class="field"><label>Full name</label><input id="f-name" value="${s.name}"></div>
+      <div class="field"><label>Grade level</label>
+        <select id="f-grade">${['Grade 7','Grade 8','Grade 9','Grade 10','Grade 11','Grade 12'].map(g=>`<option ${g===s.grade?'selected':''}>${g}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Section</label><input id="f-section" value="${s.section}" placeholder="   "></div>
+      <div class="field"><label>Parent contact</label><input id="f-contact" value="${s.parentContact}" placeholder="+63"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="f-cancel">Cancel</button>
+      <button class="btn navy" id="f-save">${studentId?'Save changes':'Add &amp; create accounts'}</button>
+    </div>
+  `);
+  document.getElementById('f-cancel').addEventListener('click', closeModal);
+  document.getElementById('f-save').addEventListener('click', async ()=>{
+    const name = document.getElementById('f-name').value.trim();
+    const grade = document.getElementById('f-grade').value;
+    const section = document.getElementById('f-section').value.trim();
+    const parentContact = document.getElementById('f-contact').value.trim();
+    if(!name || !section){ showToast('Name and section are required.', 'error'); return; }
+    if(studentId){
+      try{
+        await fsDb.collection('students').doc(studentId).update({name, grade, section, parentContact});
+        showToast('Student updated.', 'success');
+        closeModal(); renderPage();
+      }catch(e){ showToast('Could not save: '+(e.message||e), 'error'); }
+      return;
+    }
+    try{
+      const countSnap = await fsDb.collection('students').get();
+      const id = 'SLN-' + String(1001 + countSnap.size);
+      const studentPass = genPassword();
+      const parentPass = genPassword();
+      const secAuth = secondaryAuth();
+      const studentCred = await secAuth.createUserWithEmailAndPassword(slug(id)+LOGIN_DOMAIN, studentPass);
+      const studentUid = studentCred.user.uid;
+      await secAuth.signOut();
+      const parentCred = await secAuth.createUserWithEmailAndPassword(slug(id)+'.parent'+LOGIN_DOMAIN, parentPass);
+      const parentUid = parentCred.user.uid;
+      await secAuth.signOut();
+
+      await fsDb.collection('students').doc(id).set({name, grade, section, parentContact, studentUid, parentUid, studentPassword:studentPass, parentPassword:parentPass});
+      await fsDb.collection('accounts').doc(studentUid).set({role:'student', name, studentId:id, username:id});
+      await fsDb.collection('accounts').doc(parentUid).set({role:'parent', name:'Parent of '+name, studentId:id, username:id+'.parent'});
+
+      closeModal();
+      showToast('Account created — here are the login details.', 'success');
+      renderPage();
+      openCredentialsModal(id, studentPass, parentPass);
+    }catch(e){
+      showToast('Could not create account: '+(e.message||e), 'error');
+    }
+  });
+}
+
+function openCredentialsModal(studentId, studentPass, parentPass){
+  openModal(`
+    <h3>New account credentials</h3>
+    <div class="sub">Give these to the student and parent - shown only once here, so save/print now.</div>
+    <div class="qr-box"><div id="qr-render"></div><div class="qr-id">${studentId}</div></div>
+    <div class="staff-row"><div><strong>Student login</strong><br>Username: <span class="id-mono">${studentId}</span></div><span class="id-mono">${studentPass}</span></div>
+    <div class="staff-row"><div><strong>Parent login</strong><br>Username: <span class="id-mono">${studentId}.parent</span></div><span class="id-mono">${parentPass}</span></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="cred-close">Close</button>
+      <button class="btn navy" id="cred-print">🖶 Print</button>
+    </div>
+  `);
+  setTimeout(()=>{
+    document.getElementById('qr-render').innerHTML='';
+    new QRCode(document.getElementById('qr-render'), {text:studentId, width:150, height:150, colorDark:'#4A0F1C', colorLight:'#ffffff'});
+  },10);
+  document.getElementById('cred-close').addEventListener('click', closeModal);
+  document.getElementById('cred-print').addEventListener('click', ()=>window.print());
+}
+
+function openAddStaff(){
+  openModal(`
+    <h3>Add staff account</h3>
+    <div class="form-grid">
+      <div class="field"><label>Full name</label><input id="s-name" placeholder="  "></div>
+      <div class="field"><label>Role</label>
+        <select id="s-role"><option value="adviser">Adviser</option><option value="principal">Principal</option></select>
+      </div>
+    </div>
+    <div class="field" id="s-section-field"><label>Section (advisers only)</label><input id="s-section" placeholder="  "></div>
+    <div class="field"><label>Username</label><input id="s-user" class="mono" placeholder="  "></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="s-cancel">Cancel</button>
+      <button class="btn navy" id="s-save">Create account</button>
+    </div>
+  `);
+  document.getElementById('s-cancel').addEventListener('click', closeModal);
+  document.getElementById('s-save').addEventListener('click', async ()=>{
+    const name = document.getElementById('s-name').value.trim();
+    const role = document.getElementById('s-role').value;
+    const section = document.getElementById('s-section').value.trim();
+    const username = document.getElementById('s-user').value.trim();
+    if(!name || !username || (role==='adviser' && !section)){ showToast('Fill in every required field.', 'error'); return; }
+    try{
+      const pass = genPassword();
+      const secAuth = secondaryAuth();
+      const cred = await secAuth.createUserWithEmailAndPassword(slug(username)+LOGIN_DOMAIN, pass);
+      await secAuth.signOut();
+      const doc = {role, name, username:slug(username), password:pass};
+      if(role==='adviser') doc.section = section;
+      await fsDb.collection('accounts').doc(cred.user.uid).set(doc);
+      closeModal();
+      showToast('Staff account created.', 'success');
+      openModal(`
+        <h3>Staff account created</h3>
+        <div class="staff-row"><div><strong>${name}</strong><br>${role}${section?' · '+section:''}</div></div>
+        <div class="staff-row"><div>Username</div><span class="id-mono">${slug(username)}</span></div>
+        <div class="staff-row"><div>Password</div><span class="id-mono">${pass}</span></div>
+        <div class="modal-actions"><button class="btn navy" id="s-done">Done</button></div>
+      `);
+      document.getElementById('s-done').addEventListener('click', ()=>{ closeModal(); renderPage(); });
+    }catch(e){ showToast('Could not create account: '+(e.message||e), 'error'); }
+  });
+}
+
+async function openStaffAccountModal(uid){
+  const doc = await fsDb.collection('accounts').doc(uid).get();
+  if(!doc.exists) return;
+  const a = doc.data();
+  openModal(`
+    <h3>Staff Account</h3>
+    <div class="sub">${a.name}${a.section?' · Section '+a.section:''} · ${a.role}</div>
+    <div class="staff-row"><div><strong>Login</strong><br>Username: <span class="id-mono">${a.username}</span></div><span class="id-mono">${a.password||'—'}</span></div>
+    ${!a.password?`<div class="login-note" style="margin-top:8px;">Password wasn't saved (created before this feature). Delete and re-add to set a viewable password.</div>`:''}
+    <div class="modal-actions"><button class="btn ghost" id="staff-acc-close">Close</button></div>
+  `);
+  document.getElementById('staff-acc-close').addEventListener('click', closeModal);
+}
+
+async function confirmDeleteStaff(uid, name){
+  openModal(`
+    <h3>Delete staff account?</h3>
+    <div class="sub">${name}</div>
+    <div class="login-note" style="margin-top:8px;">This removes their access within the app. Note: the underlying Firebase Authentication login isn't deleted automatically (that needs admin-level access) — for full cleanup also remove them in Firebase Console → Authentication → Users.</div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="staff-del-cancel">Cancel</button>
+      <button class="btn danger" id="staff-del-confirm">Delete account</button>
+    </div>
+  `);
+  document.getElementById('staff-del-cancel').addEventListener('click', closeModal);
+  document.getElementById('staff-del-confirm').addEventListener('click', async ()=>{
+    try{
+      await fsDb.collection('accounts').doc(uid).delete();
+      closeModal();
+      showToast('Staff account removed.', 'success');
+      renderPage();
+    }catch(e){
+      showToast('Could not delete: '+(e.message||e), 'error');
+    }
+  });
+}
+function wirePageEvents(){
+  const main = document.getElementById('main');
+
+  wireQrButtons(main);
+  wireDeleteButtons(main);
+  main.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', ()=>openEditStudent(b.dataset.edit)));
+  main.querySelectorAll('[data-staff-delete]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteStaff(b.dataset.staffDelete, b.dataset.staffName)));
+  main.querySelectorAll('[data-staff-account]').forEach(b=>b.addEventListener('click', ()=>openStaffAccountModal(b.dataset.staffAccount)));
+  main.querySelectorAll('[data-approve]').forEach(b=>b.addEventListener('click', ()=>approveSubmission(b.dataset.approve)));
+  main.querySelectorAll('[data-reject]').forEach(b=>b.addEventListener('click', ()=>rejectSubmission(b.dataset.reject)));
+
+  const addBtn = document.getElementById('btn-add-student');
+  if(addBtn) addBtn.addEventListener('click', ()=>openEditStudent(null));
+
+  const addStaffBtn = document.getElementById('btn-add-staff');
+  if(addStaffBtn) addStaffBtn.addEventListener('click', openAddStaff);
+
+  const staffSearch = document.getElementById('staff-search');
+  if(staffSearch) staffSearch.addEventListener('input', async ()=>{
+    const q = staffSearch.value.toLowerCase();
+    const snap = await fsDb.collection('accounts').where('role','in',['principal','adviser']).get();
+    const staff = snap.docs.map(d=>({uid:d.id, ...d.data()}));
+    const filtered = staff.filter(a=>a.name.toLowerCase().includes(q));
+    document.getElementById('staff-list-wrap').innerHTML = staffRows(filtered);
+    document.querySelectorAll('[data-staff-account]').forEach(b=>b.addEventListener('click', ()=>openStaffAccountModal(b.dataset.staffAccount)));
+    document.querySelectorAll('[data-staff-delete]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteStaff(b.dataset.staffDelete, b.dataset.staffName)));
+  });
+
+  const search = document.getElementById('student-search');
+  if(search) search.addEventListener('input', async ()=>{
+    const q = search.value.toLowerCase();
+    const students = await fetchAllStudents();
+    const payments = await fetchAllPayments();
+    const filtered = students.filter(s=>s.name.toLowerCase().includes(q)||s.id.toLowerCase().includes(q));
+    document.getElementById('students-table-wrap').innerHTML = studentsTable(filtered, payments, {edit:true});
+    wireQrButtons(document.getElementById('students-table-wrap'));
+    document.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', ()=>openEditStudent(b.dataset.edit)));
+    wireDeleteButtons(document.getElementById('students-table-wrap'));
+  });
+
+  const methodGrid = document.getElementById('method-grid');
+  if(methodGrid){
+    let chosenMethod = null;
+    methodGrid.querySelectorAll('.method-opt').forEach(m=>{
+      m.addEventListener('click', ()=>{
+        methodGrid.querySelectorAll('.method-opt').forEach(x=>x.classList.remove('active'));
+        m.classList.add('active');
+        chosenMethod = m.dataset.method;
+      });
+    });
+    document.getElementById('btn-record-payment').addEventListener('click', async ()=>{
+      const studentId = document.getElementById('pay-student').value;
+      const amount = Number(document.getElementById('pay-amount').value);
+      const ref = document.getElementById('pay-ref').value.trim();
+      const date = document.getElementById('pay-date').value;
+      if(!amount || amount<=0){ showToast('Enter a valid amount.', 'error'); return; }
+      if(!chosenMethod){ showToast('Select a payment method.', 'error'); return; }
+      if(!ref){ showToast('Enter a reference number.', 'error'); return; }
+      const student = await fetchOneStudent(studentId);
+      try{
+        await fsDb.collection('payments').add({studentId, section:student.section, method:chosenMethod, reference:ref, amount, date, verifiedBy:session.name});
+        showToast('Payment verified and recorded.', 'success');
+        renderPage();
+      }catch(e){ showToast('Could not save: '+(e.message||e), 'error'); }
+    });
+  }
+
+  const saveSettings = document.getElementById('btn-save-settings');
+  if(saveSettings) saveSettings.addEventListener('click', async ()=>{
+    SETTINGS.amountDue = Number(document.getElementById('set-amount').value)||SETTINGS.amountDue;
+    SETTINGS.deadline = document.getElementById('set-deadline').value||SETTINGS.deadline;
+    SETTINGS.schoolYear = document.getElementById('set-year').value||SETTINGS.schoolYear;
+    try{
+      await fsDb.collection('settings').doc('main').set(SETTINGS);
+      showToast('PTA settings saved.', 'success');
+      renderPage();
+    }catch(e){ showToast('Could not save: '+(e.message||e), 'error'); }
+  });
+
+  wireReportEvents();
+}
+guardPage(['admin'], ()=>{ enterApp(); });
+</script>
+</body>
+</html>
